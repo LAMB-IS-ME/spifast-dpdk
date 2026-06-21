@@ -1,0 +1,6 @@
+No,l34-filter-group,Precedence,Action
+1,fg_l34_facebook,100,FORWARD
+2,fg_l34_youtube,101,DROP
+3,fg_l34_http_sdf1003,102,FORWARD
+4,fg_l34_https_sdf1004,103,FORWARD
+5,fg_l34_dns_sdf1005,104,DROP
