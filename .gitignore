@@ -1,0 +1,68 @@
+# ===========================
+# Các file binary và object
+# ===========================
+*.o
+*.ko
+*.obj
+*.a
+*.la
+*.lo
+*.so
+*.so.*
+*.elf
+*.bin
+*.hex
+*.out
+
+# ===========================
+# Thư mục build (Meson / Ninja / Make)
+# ===========================
+build/
+builddir/
+dist/
+
+# ===========================
+# File chạy ứng dụng
+# ===========================
+spifast
+
+# ===========================
+# DPDK-specific
+# ===========================
+# Hugepage info (đôi khi được dump ra)
+*.hugepage
+# Core dump files
+core
+core.*
+
+# ===========================
+# Meson build system
+# ===========================
+meson-logs/
+meson-info/
+subprojects/
+
+# ===========================
+# Các file log / kết quả test tạm thời
+# ===========================
+*.log
+*.csv
+!SPI_rule.csv
+!SPI_policy.csv
+
+# ===========================
+# File cấu hình IDE / Editor
+# ===========================
+.vscode/
+.idea/
+*.swp
+*~
+*.kate-swp
+.cache/
+compile_commands.json
+
+# ===========================
+# OS-generated
+# ===========================
+.DS_Store
+Thumbs.db
