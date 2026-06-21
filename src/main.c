@@ -23,6 +23,9 @@
 #include <rte_lcore.h>
 #include <rte_log.h>
 
+#include "parser.h"
+#include "acl.h"
+
 /* ------------------------------------------------------------
  * Hang so cau hinh (dong bo voi something.md muc 4.1 / 4.4)
  * ------------------------------------------------------------ */
@@ -144,11 +147,32 @@ main(int argc, char **argv)
 	/* TODO (buoc sau): rte_eth_dev_configure / rx_queue_setup / dev_start
 	 * cho port vdev net_pcap0. Chua lam o buoc khung nay. */
 
-	/* TODO (buoc sau): Load SPI_policy.csv truoc, roi SPI_rule.csv
-	 * (Parser module - theo dung thu tu trong something.md muc 4.2). */
+	/* ------------------------------------------------------------
+	 * 3b. Load CSV: Policy truoc, Rule sau (spec muc 4.2)
+	 * ------------------------------------------------------------ */
+	if (load_policy("SPI_policy.csv") < 0) {
+		rte_exit(EXIT_FAILURE, "Khong the load SPI_policy.csv\n");
+	}
+	if (load_rules("SPI_rule.csv") < 0) {
+		rte_exit(EXIT_FAILURE, "Khong the load SPI_rule.csv\n");
+	}
 
-	/* TODO (buoc sau): Khoi tao DPDK ACL context (field defs, add rules
-	 * voi precedence/userdata - theo something.md muc 4.3). */
+	/* ------------------------------------------------------------
+	 * 3c. Khoi tao DPDK ACL context + add rules + build trie
+	 * (MASTER_SPEC.md muc 4.3)
+	 * ------------------------------------------------------------ */
+	struct rte_acl_ctx *acl_ctx = NULL;
+
+	if (acl_init(&acl_ctx) < 0) {
+		rte_exit(EXIT_FAILURE, "Khong the tao ACL context\n");
+	}
+	if (acl_add_rules_from_parsed(acl_ctx) < 0) {
+		rte_exit(EXIT_FAILURE, "Khong the add/build ACL rules\n");
+	}
+	/* TODO (buoc sau): Setup 2 rings (RX, FLOW) cho moi worker: 
+	 *   - Mbuf->RX -> RX ring
+	 *   - Worker lay mbuf tu RX ring, classif via acl_classify, 
+	 *     gui vao FLOW ring */
 
 	/* ------------------------------------------------------------
 	 * 4. Khoi chay lcore - Master + Worker (placeholder)
