@@ -3,13 +3,13 @@
  * ------------------------------------------------------------
  *   - EAL init (rte_eal_init)
  *   - Tao Mempool chuan (8192 mbufs, cache 256)
- *   - Kiem tra so luong port mang (vdev net_pcap0)
- *   - Khoi chay lcore (Master + Worker) - PLACEHOLDER, chua co logic
- *     Parser/ACL/Dispatcher/Worker that su (se lam o cac buoc sau).
- *
- * KHONG tu y sinh them logic Parser / ACL / Header-parse / Hash /
- * Statistics trong file nay - theo dung "QUY TAC TUONG TAC" cua
- * master spec (something.md).
+ *   - Kiem tra va setup port mang (vdev net_pcap0)
+ *   - Load CSV (Policy truoc, Rule sau)
+ *   - Khoi tao ACL context + build trie
+ *   - Tao rte_ring cho Worker
+ *   - Launch Worker lcore 1-4 (worker_main)
+ *   - Chay Dispatcher tren Master lcore 0 (dispatcher_run)
+ *   - In thong ke cuoi cung (print_final_stats)
  * ============================================================ */
 
 #include <stdio.h>
@@ -25,17 +25,22 @@
 
 #include "parser.h"
 #include "acl.h"
+#include "worker.h"
 
 /* ------------------------------------------------------------
- * Hang so cau hinh (dong bo voi something.md muc 4.1 / 4.4)
+ * Hang so cau hinh (dong bo voi MASTER_SPEC muc 4.1 / 4.4)
+ * NUM_WORKERS da define trong worker.h
  * ------------------------------------------------------------ */
-#define NUM_WORKERS         4
 #define MBUF_POOL_NAME      "SPIFAST_MBUF_POOL"
 #define NUM_MBUFS           8192
 #define MBUF_CACHE_SIZE     256
 #define MBUF_DATA_SIZE      RTE_MBUF_DEFAULT_BUF_SIZE
 
 static struct rte_mempool *spifast_pktmbuf_pool = NULL;
+
+/* ACL context toan cuc — read-only sau khi build xong (thread-safe)
+ * Dinh nghia that su o day, extern trong worker.h */
+struct rte_acl_ctx *acl_ctx = NULL;
 
 /* ------------------------------------------------------------
  * Ham khoi tao Mempool chuan
@@ -86,27 +91,44 @@ spifast_check_ports(void)
 }
 
 /* ------------------------------------------------------------
- * Lcore worker function - PLACEHOLDER
- * Master (lcore_id == rte_get_main_lcore()) se lam Dispatcher.
- * Worker (lcore_id khac) se lam Worker.
- * Logic that su (rx_burst/hash/ring/acl_classify/...) se duoc
- * them vao cac buoc tiep theo, KHONG sinh truoc o day.
+ * Setup port vdev net_pcap0: configure, rx_queue_setup, dev_start
  * ------------------------------------------------------------ */
-static int
-spifast_lcore_main(__rte_unused void *arg)
-{
-	unsigned lcore_id = rte_lcore_id();
+#define NUM_RX_DESC  128
 
-	if (lcore_id == rte_get_main_lcore()) {
-		printf("[LCORE %u] Master (Rx/Dispatcher) - cho logic o buoc sau\n",
-			lcore_id);
-	} else {
-		printf("[LCORE %u] Worker - cho logic o buoc sau\n", lcore_id);
+static void
+spifast_port_setup(uint16_t port_id)
+{
+	struct rte_eth_conf port_conf;
+	int ret;
+
+	memset(&port_conf, 0, sizeof(port_conf));
+
+	/* Configure port voi 1 RX queue, 0 TX queue (khong can TX) */
+	ret = rte_eth_dev_configure(port_id, 1, 0, &port_conf);
+	if (ret < 0) {
+		rte_exit(EXIT_FAILURE,
+			"Loi rte_eth_dev_configure(port=%u): %s\n",
+			port_id, rte_strerror(-ret));
 	}
 
-	/* TODO (cac buoc sau): vong lap rx_burst / ring_dequeue thuc te */
+	/* Setup RX queue 0 */
+	ret = rte_eth_rx_queue_setup(port_id, 0, NUM_RX_DESC,
+		rte_eth_dev_socket_id(port_id), NULL, spifast_pktmbuf_pool);
+	if (ret < 0) {
+		rte_exit(EXIT_FAILURE,
+			"Loi rte_eth_rx_queue_setup(port=%u): %s\n",
+			port_id, rte_strerror(-ret));
+	}
 
-	return 0;
+	/* Start port */
+	ret = rte_eth_dev_start(port_id);
+	if (ret < 0) {
+		rte_exit(EXIT_FAILURE,
+			"Loi rte_eth_dev_start(port=%u): %s\n",
+			port_id, rte_strerror(-ret));
+	}
+
+	printf("[INIT] Port %u da setup va start thanh cong\n", port_id);
 }
 
 int
@@ -144,8 +166,10 @@ main(int argc, char **argv)
 	 * ------------------------------------------------------------ */
 	spifast_check_ports();
 
-	/* TODO (buoc sau): rte_eth_dev_configure / rx_queue_setup / dev_start
-	 * cho port vdev net_pcap0. Chua lam o buoc khung nay. */
+	/* ------------------------------------------------------------
+	 * 3a. Setup port vdev net_pcap0
+	 * ------------------------------------------------------------ */
+	spifast_port_setup(0);
 
 	/* ------------------------------------------------------------
 	 * 3b. Load CSV: Policy truoc, Rule sau (spec muc 4.2)
@@ -161,31 +185,42 @@ main(int argc, char **argv)
 	 * 3c. Khoi tao DPDK ACL context + add rules + build trie
 	 * (MASTER_SPEC.md muc 4.3)
 	 * ------------------------------------------------------------ */
-	struct rte_acl_ctx *acl_ctx = NULL;
-
 	if (acl_init(&acl_ctx) < 0) {
 		rte_exit(EXIT_FAILURE, "Khong the tao ACL context\n");
 	}
 	if (acl_add_rules_from_parsed(acl_ctx) < 0) {
 		rte_exit(EXIT_FAILURE, "Khong the add/build ACL rules\n");
 	}
-	/* TODO (buoc sau): Setup 2 rings (RX, FLOW) cho moi worker: 
-	 *   - Mbuf->RX -> RX ring
-	 *   - Worker lay mbuf tu RX ring, classif via acl_classify, 
-	 *     gui vao FLOW ring */
 
 	/* ------------------------------------------------------------
-	 * 4. Khoi chay lcore - Master + Worker (placeholder)
+	 * 3d. Tao rte_ring cho Worker (SPSC)
 	 * ------------------------------------------------------------ */
-	RTE_LCORE_FOREACH_WORKER(lcore_id) {
-		rte_eal_remote_launch(spifast_lcore_main, NULL, lcore_id);
+	if (worker_rings_init() < 0) {
+		rte_exit(EXIT_FAILURE, "Khong the tao worker rings\n");
 	}
 
-	/* Master lcore chay truc tiep tai day */
-	spifast_lcore_main(NULL);
+	/* ------------------------------------------------------------
+	 * 4. Launch Worker lcore 1-4, chay Dispatcher tren Master
+	 * ------------------------------------------------------------ */
+	unsigned worker_idx = 0;
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
+		if (worker_idx >= NUM_WORKERS)
+			break;
+		rte_eal_remote_launch(worker_main,
+			(void *)(uintptr_t)worker_idx, lcore_id);
+		printf("[INIT] Worker %u launched tren lcore %u\n",
+			worker_idx, lcore_id);
+		worker_idx++;
+	}
 
-	/* Cho tat ca worker lcore ket thuc */
+	/* Master lcore (lcore 0) chay Dispatcher */
+	dispatcher_run();
+
+	/* Cho tat ca Worker lcore ket thuc */
 	rte_eal_mp_wait_lcore();
+
+	/* In thong ke cuoi cung */
+	print_final_stats();
 
 	/* ------------------------------------------------------------
 	 * 5. Don dep
