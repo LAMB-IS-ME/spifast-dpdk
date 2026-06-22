@@ -16,6 +16,7 @@
 #include <rte_acl.h>
 #include <rte_common.h>
 #include <rte_log.h>
+#include <rte_byteorder.h>
 
 #include "parser.h"
 #include "acl.h"
@@ -225,15 +226,14 @@ acl_add_rules_from_parsed(struct rte_acl_ctx *ctx)
 		ar->data.priority      = (int32_t)pr->precedence;
 
 		/* --- Field 0: protocol (BITMASK) ---
-		 * value.u8 = protocol number (6=TCP, 17=UDP, 0=any)
-		 * mask_range.u8 = bitmask (0xFF neu cu the, 0x00 neu wildcard) */
+		 * 1 byte, khong co van de byte order */
 		ar->field[0].value.u8      = pr->protocol;
 		ar->field[0].mask_range.u8 = pr->protocol_mask;
 
 		/* --- Field 1: src_ip (MASK) ---
-		 * value.u32 = dia chi IP (host-byte-order)
-		 * mask_range.u32 = depth (so bit prefix, vd /18 -> 18)
-		 * DPDK ACL dung "depth" cho MASK type, KHONG dung bitmask. */
+		 * Rule values o HOST byte order. DPDK ACL trie builder
+		 * tu dong convert sang NBO internally khi build trie.
+		 * mask_range = depth (so bit prefix) — giu nguyen. */
 		ar->field[1].value.u32      = pr->src_ip;
 		ar->field[1].mask_range.u32 = mask_to_depth(pr->src_mask);
 
@@ -242,10 +242,8 @@ acl_add_rules_from_parsed(struct rte_acl_ctx *ctx)
 		ar->field[2].mask_range.u32 = mask_to_depth(pr->dst_mask);
 
 		/* --- Field 3: src_port (RANGE) ---
-		 * Voi RANGE type:
-		 *   value.u16      = gia tri thap (port low)
-		 *   mask_range.u16 = gia tri cao (port high)
-		 * KHONG dung mask cho RANGE, ma dung cap [low, high]. */
+		 * Rule values o HOST byte order.
+		 * DPDK ACL trie builder tu convert sang NBO internally. */
 		ar->field[3].value.u16      = pr->src_port_low;
 		ar->field[3].mask_range.u16 = pr->src_port_high;
 
@@ -293,6 +291,100 @@ acl_add_rules_from_parsed(struct rte_acl_ctx *ctx)
 
 	/* Dump ACL context de debug (in ra console) */
 	rte_acl_dump(ctx);
+
+	/* --------------------------------------------------------
+	 * [ACL_TEST] Inline classify test — xac dinh byte order
+	 * --------------------------------------------------------
+	 * Test voi CA HAI byte order (host-order va network-byte-order)
+	 * de xac dinh root cause cua bug "always userdata=0".
+	 * -------------------------------------------------------- */
+	{
+		five_tuple_t tHO;   /* Host-Order */
+		five_tuple_t tNBO;  /* Network-Byte-Order */
+		const uint8_t *data_ho[1];
+		const uint8_t *data_nbo[1];
+		uint32_t res_ho[1], res_nbo[1];
+
+		printf("\n[ACL_TEST] === Inline classify test (sau build) ===\n");
+
+		/* --- Test 1: TCP dst_port=80 (expect Rule 10, userdata=10) --- */
+		memset(&tHO, 0, sizeof(tHO));
+		tHO.protocol = 6;         /* TCP */
+		tHO.src_ip   = 0x0A000001; /* 10.0.0.1 host-order */
+		tHO.dst_ip   = 0x68141798; /* 104.20.23.152 host-order */
+		tHO.src_port = 12345;     /* host-order */
+		tHO.dst_port = 80;        /* host-order */
+
+		memset(&tNBO, 0, sizeof(tNBO));
+		tNBO.protocol = 6;
+		tNBO.src_ip   = rte_cpu_to_be_32(0x0A000001);
+		tNBO.dst_ip   = rte_cpu_to_be_32(0x68141798);
+		tNBO.src_port = rte_cpu_to_be_16(12345);
+		tNBO.dst_port = rte_cpu_to_be_16(80);
+
+		data_ho[0] = (const uint8_t *)&tHO;
+		data_nbo[0] = (const uint8_t *)&tNBO;
+		res_ho[0] = 0; res_nbo[0] = 0;
+
+		rte_acl_classify(ctx, data_ho, res_ho, 1, 1);
+		rte_acl_classify(ctx, data_nbo, res_nbo, 1, 1);
+
+		printf("[ACL_TEST] Test 1 (TCP dport=80):  HO_userdata=%u  NBO_userdata=%u  (expect=10)\n",
+			res_ho[0], res_nbo[0]);
+
+		/* --- Test 2: UDP dst_port=53 (expect Rule 12, userdata=12) --- */
+		memset(&tHO, 0, sizeof(tHO));
+		tHO.protocol = 17;
+		tHO.src_ip   = 0x0A000001;
+		tHO.dst_ip   = 0x08080808; /* 8.8.8.8 */
+		tHO.src_port = 55555;
+		tHO.dst_port = 53;
+
+		memset(&tNBO, 0, sizeof(tNBO));
+		tNBO.protocol = 17;
+		tNBO.src_ip   = rte_cpu_to_be_32(0x0A000001);
+		tNBO.dst_ip   = rte_cpu_to_be_32(0x08080808);
+		tNBO.src_port = rte_cpu_to_be_16(55555);
+		tNBO.dst_port = rte_cpu_to_be_16(53);
+
+		data_ho[0] = (const uint8_t *)&tHO;
+		data_nbo[0] = (const uint8_t *)&tNBO;
+		res_ho[0] = 0; res_nbo[0] = 0;
+
+		rte_acl_classify(ctx, data_ho, res_ho, 1, 1);
+		rte_acl_classify(ctx, data_nbo, res_nbo, 1, 1);
+
+		printf("[ACL_TEST] Test 2 (UDP dport=53):  HO_userdata=%u  NBO_userdata=%u  (expect=12)\n",
+			res_ho[0], res_nbo[0]);
+
+		/* --- Test 3: TCP dst_port=443 (expect Rule 11, userdata=11) --- */
+		memset(&tHO, 0, sizeof(tHO));
+		tHO.protocol = 6;
+		tHO.src_ip   = 0x0A000002;
+		tHO.dst_ip   = 0xC0A80001; /* 192.168.0.1 */
+		tHO.src_port = 40000;
+		tHO.dst_port = 443;
+
+		memset(&tNBO, 0, sizeof(tNBO));
+		tNBO.protocol = 6;
+		tNBO.src_ip   = rte_cpu_to_be_32(0x0A000002);
+		tNBO.dst_ip   = rte_cpu_to_be_32(0xC0A80001);
+		tNBO.src_port = rte_cpu_to_be_16(40000);
+		tNBO.dst_port = rte_cpu_to_be_16(443);
+
+		data_ho[0] = (const uint8_t *)&tHO;
+		data_nbo[0] = (const uint8_t *)&tNBO;
+		res_ho[0] = 0; res_nbo[0] = 0;
+
+		rte_acl_classify(ctx, data_ho, res_ho, 1, 1);
+		rte_acl_classify(ctx, data_nbo, res_nbo, 1, 1);
+
+		printf("[ACL_TEST] Test 3 (TCP dport=443): HO_userdata=%u  NBO_userdata=%u  (expect=11)\n",
+			res_ho[0], res_nbo[0]);
+
+		printf("[ACL_TEST] === Ket luan: Neu NBO match va HO khong -> "
+			"ACL expect NBO data ===\n\n");
+	}
 
 	return 0;
 }

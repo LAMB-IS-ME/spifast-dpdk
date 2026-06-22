@@ -38,10 +38,17 @@ parse_packet_5tuple(struct rte_mbuf *mbuf, five_tuple_t *out)
 	ip = (struct rte_ipv4_hdr *)((uint8_t *)eth + sizeof(struct rte_ether_hdr));
 
 	/* Gan field-by-field (KHONG memcpy raw vi five_tuple_t co
-	 * padding 3 bytes sau protocol) */
+	 * padding 3 bytes sau protocol).
+	 *
+	 * LUU Y BYTE ORDER: DPDK ACL (rte_acl_classify) expect input
+	 * data co multi-byte fields o NETWORK BYTE ORDER. Trie builder
+	 * da tu convert rule values (host-order) sang NBO byte patterns
+	 * khi build trie. Do do, ta KHONG convert IP/port tu NBO sang
+	 * host-order — giu nguyen NBO tu packet headers.
+	 */
 	out->protocol = ip->next_proto_id;
-	out->src_ip   = rte_be_to_cpu_32(ip->src_addr);
-	out->dst_ip   = rte_be_to_cpu_32(ip->dst_addr);
+	out->src_ip   = ip->src_addr;    /* NBO — KHONG rte_be_to_cpu_32 */
+	out->dst_ip   = ip->dst_addr;    /* NBO — KHONG rte_be_to_cpu_32 */
 
 	/* ----------------------------------------------------------
 	 * L4: TCP hoac UDP header (ngay sau IPv4 header)
@@ -51,12 +58,12 @@ parse_packet_5tuple(struct rte_mbuf *mbuf, five_tuple_t *out)
 
 	if (out->protocol == IPPROTO_TCP) {
 		struct rte_tcp_hdr *tcp = (struct rte_tcp_hdr *)l4_ptr;
-		out->src_port = rte_be_to_cpu_16(tcp->src_port);
-		out->dst_port = rte_be_to_cpu_16(tcp->dst_port);
+		out->src_port = tcp->src_port;  /* NBO — KHONG rte_be_to_cpu_16 */
+		out->dst_port = tcp->dst_port;  /* NBO — KHONG rte_be_to_cpu_16 */
 	} else if (out->protocol == IPPROTO_UDP) {
 		struct rte_udp_hdr *udp = (struct rte_udp_hdr *)l4_ptr;
-		out->src_port = rte_be_to_cpu_16(udp->src_port);
-		out->dst_port = rte_be_to_cpu_16(udp->dst_port);
+		out->src_port = udp->src_port;  /* NBO — KHONG rte_be_to_cpu_16 */
+		out->dst_port = udp->dst_port;  /* NBO — KHONG rte_be_to_cpu_16 */
 	} else {
 		/* Protocol khac TCP/UDP: port = 0, van return 0
 		 * De ACL tu quyet dinh action (KHONG drop o day) */
