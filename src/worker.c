@@ -91,6 +91,11 @@ dispatcher_run(void *arg __rte_unused)
 	printf("[DISPATCHER] Bat dau rx_burst tren lcore %u\n",
 		rte_lcore_id());
 
+	uint64_t tsc_hz       = rte_get_timer_hz();
+	uint64_t last_tsc     = rte_get_timer_cycles();
+	uint64_t last_rx_pkts = 0;
+	uint64_t last_rx_bytes = 0;
+
 	while (!force_quit) {
 		nb_rx = rte_eth_rx_burst(0, 0, mbufs, RX_BURST_SIZE);
 
@@ -130,6 +135,74 @@ dispatcher_run(void *arg __rte_unused)
 				rte_pktmbuf_free(mbufs[i]);
 			}
 		}
+
+		/* --- Stats định kỳ 1 giây --- */
+		uint64_t now = rte_get_timer_cycles();
+		if (now - last_tsc >= tsc_hz) {
+			double delta_s = (double)(now - last_tsc) / (double)tsc_hz;
+
+			uint64_t pkts_interval  = disp_stats.total_rx_pkts  - last_rx_pkts;
+			uint64_t bytes_interval = disp_stats.total_rx_bytes - last_rx_bytes;
+
+			/* Throughput và Flow Rate */
+			uint64_t mbps = (uint64_t)((double)(bytes_interval * 8)
+							/ 1000000.0 / delta_s);
+			uint64_t pps  = (uint64_t)((double)pkts_interval / delta_s);
+
+			/* Collect worker stats (snapshot — đọc volatile trực tiếp) */
+			uint64_t snap_group[MAX_GROUPS];
+			uint64_t snap_default = 0;
+			uint64_t snap_classified = 0;
+			uint32_t g;
+			unsigned w;
+
+			memset(snap_group, 0, sizeof(snap_group));
+			for (w = 0; w < NUM_WORKERS; w++) {
+				snap_default    += worker_stats[w].default_drop_count;
+				snap_classified += worker_stats[w].total_classified;
+				for (g = 0; g < num_groups; g++)
+					snap_group[g] += worker_stats[w].group_hit_count[g];
+			}
+
+			/* Missing Rate */
+			uint64_t accounted = snap_classified
+							   + disp_stats.non_ipv4_count
+							   + disp_stats.ring_drop_count;
+			uint64_t missing = (disp_stats.total_rx_pkts > accounted)
+							 ? (disp_stats.total_rx_pkts - accounted) : 0;
+			uint64_t missing_pct = (disp_stats.total_rx_pkts > 0)
+								 ? (missing * 100 / disp_stats.total_rx_pkts)
+								 : 0;
+
+			/* Drop Rate (ring full) */
+			uint64_t drop_pct = (pkts_interval > 0)
+							  ? (disp_stats.ring_drop_count * 100
+								 / disp_stats.total_rx_pkts)
+							  : 0;
+
+			/* In ra console theo format MASTER_SPEC mục 4.6 */
+			printf("\n================= SPI RUNTIME STATS (1s) =================\n");
+			printf("Throughput: %lu Mbps | Flow Rate: %lu pps\n", mbps, pps);
+			printf("Missing Rate: %lu%% | Packet Drop Rate (Ring full): %lu%%\n",
+				   missing_pct, drop_pct);
+			printf("----------------------------------------------------------\n");
+			for (g = 0; g < num_groups; g++) {
+				printf("[Group: %-24s] Hit: %lu pkts | Action: %s\n",
+					   filter_groups[g].group_name,
+					   snap_group[g],
+					   filter_groups[g].action == ACTION_FORWARD
+						   ? "FORWARD" : "DROP");
+			}
+			printf("[Default/Unmatched]              "
+				   "Hit: %lu pkts | Action: DROP\n", snap_default);
+			printf("==========================================================\n");
+
+			/* Cập nhật baseline cho interval tiếp theo */
+			last_tsc      = now;
+			last_rx_pkts  = disp_stats.total_rx_pkts;
+			last_rx_bytes = disp_stats.total_rx_bytes;
+		}
+		/* --- Kết thúc stats --- */
 	}
 
 	printf("[DISPATCHER] Thoat. Rx: %lu pkts, %lu bytes\n",
