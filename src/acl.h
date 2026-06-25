@@ -1,45 +1,53 @@
 /* ============================================================
  * SPIFast - acl.h
  * ------------------------------------------------------------
- * Module ACL: Khoi tao DPDK ACL context, convert parsed_rules[]
- * thanh rte_acl_rule va build trie de san sang cho classify.
+ * Module ACL: kien truc multi-context — moi filter-group co
+ * 1 rte_acl_ctx rieng biet. Classify tuan tu theo precedence
+ * tang dan (so nho = uu tien cao, classify truoc).
  *
- * KHONG chua logic classify (Worker), Header Parse, hay
- * Dispatcher — cac buoc do lam rieng sau.
+ * Theo MASTER_SPEC.md muc 4.1, 4.3.
  * ============================================================ */
 
 #ifndef SPIFAST_ACL_H
 #define SPIFAST_ACL_H
 
 #include <rte_acl.h>
+#include "parser.h"
 
-/**
- * acl_init() - Tao va cau hinh mot DPDK ACL context moi.
- *
- * Thuc hien 3 buoc:
- *   1. rte_acl_create()             -> tao context rong
- *   2. rte_acl_add_rules()          -> add tat ca parsed_rules[]
- *   3. rte_acl_build()              -> build trie noi bo
- *
- * Tra ve con tro ctx qua tham so output de main.c tu quyet dinh
- * xu ly loi (khong rte_exit() truc tiep trong module).
- *
- * @param ctx_out  [out] Con tro toi rte_acl_ctx* da khoi tao xong.
- * @return 0 thanh cong, -1 loi (thong bao in ra stderr).
- */
-int acl_init(struct rte_acl_ctx **ctx_out);
+/* ------------------------------------------------------------
+ * Anh xa 1 rule toan cuc -> group chua no.
+ * ------------------------------------------------------------ */
+typedef struct {
+	uint32_t group_id;
+	char     group_name[64];
+	uint32_t action;
+} rule_action_map_t;
 
-/**
- * acl_add_rules_from_parsed() - Convert parsed_rules[] thanh
- * rte_acl_rule va add vao ACL context, sau do build trie.
- *
- * YEU CAU: load_policy() va load_rules() phai da duoc goi thanh
- * cong truoc khi goi ham nay.
- *
- * @param ctx  ACL context da duoc tao boi acl_init() (hoac
- *             rte_acl_create() truc tiep).
- * @return 0 thanh cong, -1 loi.
- */
-int acl_add_rules_from_parsed(struct rte_acl_ctx *ctx);
+/* ------------------------------------------------------------
+ * Thong tin moi filter-group.
+ * ------------------------------------------------------------ */
+typedef struct {
+	uint32_t            group_id;
+	char                group_name[64];
+	uint32_t            action;
+	uint32_t            precedence;
+	struct rte_acl_ctx *acl_ctx;
+	uint32_t            num_rules;
+	uint32_t            global_rule_offset;
+} filter_group_t;
+
+/* ------------------------------------------------------------
+ * Externs
+ * ------------------------------------------------------------ */
+extern filter_group_t    filter_groups[MAX_GROUPS];
+extern uint32_t          num_groups;
+extern rule_action_map_t rule_action_map[MAX_RULES];
+extern uint32_t          num_rules_total;
+
+/* ------------------------------------------------------------
+ * API
+ * ------------------------------------------------------------ */
+int  acl_build_all(void);
+void acl_free_all(void);
 
 #endif /* SPIFAST_ACL_H */

@@ -34,13 +34,12 @@
 #define MBUF_POOL_NAME      "SPIFAST_MBUF_POOL"
 #define NUM_MBUFS           8192
 #define MBUF_CACHE_SIZE     256
-#define MBUF_DATA_SIZE      RTE_MBUF_DEFAULT_BUF_SIZE
+#define MBUF_DATA_SIZE      (4096 + RTE_PKTMBUF_HEADROOM)
 
 static struct rte_mempool *spifast_pktmbuf_pool = NULL;
 
-/* ACL context toan cuc — read-only sau khi build xong (thread-safe)
- * Dinh nghia that su o day, extern trong worker.h */
-struct rte_acl_ctx *acl_ctx = NULL;
+/* (Khong con global acl_ctx — moi filter-group co acl_ctx rieng
+ * trong filter_groups[], quan ly boi acl.c) */
 
 /* ------------------------------------------------------------
  * Ham khoi tao Mempool chuan
@@ -103,6 +102,10 @@ spifast_port_setup(uint16_t port_id)
 
 	memset(&port_conf, 0, sizeof(port_conf));
 
+	/* Disable scatter/multiseg — bat buoc cho infinite_rx=1 (PCAP PMD) */
+	port_conf.rxmode.offloads = 0;
+	port_conf.rxmode.mtu = RTE_ETHER_MTU;  /* 1500 */
+
 	/* Configure port voi 1 RX queue, 0 TX queue (khong can TX) */
 	ret = rte_eth_dev_configure(port_id, 1, 0, &port_conf);
 	if (ret < 0) {
@@ -112,8 +115,12 @@ spifast_port_setup(uint16_t port_id)
 	}
 
 	/* Setup RX queue 0 */
+	struct rte_eth_rxconf rxconf;
+	memset(&rxconf, 0, sizeof(rxconf));
+	rxconf.offloads = 0;  /* Explicitly no scatter — required for infinite_rx */
+
 	ret = rte_eth_rx_queue_setup(port_id, 0, NUM_RX_DESC,
-		rte_eth_dev_socket_id(port_id), NULL, spifast_pktmbuf_pool);
+		rte_eth_dev_socket_id(port_id), &rxconf, spifast_pktmbuf_pool);
 	if (ret < 0) {
 		rte_exit(EXIT_FAILURE,
 			"Loi rte_eth_rx_queue_setup(port=%u): %s\n",
@@ -185,11 +192,8 @@ main(int argc, char **argv)
 	 * 3c. Khoi tao DPDK ACL context + add rules + build trie
 	 * (MASTER_SPEC.md muc 4.3)
 	 * ------------------------------------------------------------ */
-	if (acl_init(&acl_ctx) < 0) {
-		rte_exit(EXIT_FAILURE, "Khong the tao ACL context\n");
-	}
-	if (acl_add_rules_from_parsed(acl_ctx) < 0) {
-		rte_exit(EXIT_FAILURE, "Khong the add/build ACL rules\n");
+	if (acl_build_all() < 0) {
+		rte_exit(EXIT_FAILURE, "Khong the build ACL contexts\n");
 	}
 
 	/* ------------------------------------------------------------
@@ -214,7 +218,7 @@ main(int argc, char **argv)
 	}
 
 	/* Master lcore (lcore 0) chay Dispatcher */
-	dispatcher_run();
+	dispatcher_run(NULL);
 
 	/* Cho tat ca Worker lcore ket thuc */
 	rte_eal_mp_wait_lcore();
@@ -225,6 +229,7 @@ main(int argc, char **argv)
 	/* ------------------------------------------------------------
 	 * 5. Don dep
 	 * ------------------------------------------------------------ */
+	acl_free_all();
 	rte_eal_cleanup();
 
 	return 0;
